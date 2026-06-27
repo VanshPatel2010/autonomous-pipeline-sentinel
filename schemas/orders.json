@@ -1,0 +1,10 @@
+{
+    "table": "orders",
+    "version": "1.0",
+    "columns": [
+        {"name": "order_id", "type": "TEXT", "nullable": false, "primary_key": true},
+        {"name": "created_at", "type": "DATETIME", "nullable": false, "primary_key": false},
+        {"name": "order_amount", "type": "REAL", "nullable": true, "primary_key": false},
+        {"name": "source_db", "type": "TEXT", "nullable": false, "primary_key": false}
+    ]
+}

@@ -1,0 +1,41 @@
+version: '3.8'
+
+services:
+  db-primary:
+    image: nouchka/sqlite-web:latest
+    container_name: pipeline_db_primary
+    volumes:
+      - ./data/primary:/data
+    ports:
+      - "8080:8080"
+    environment:
+      - SQLITE_DATABASE=orders.db
+    labels:
+      - "pipeline.role=primary"
+      - "pipeline.node=1"
+
+  db-replica-1:
+    image: nouchka/sqlite-web:latest
+    container_name: pipeline_db_replica1
+    volumes:
+      - ./data/replica1:/data
+    ports:
+      - "8081:8080"
+    environment:
+      - SQLITE_DATABASE=orders.db
+    labels:
+      - "pipeline.role=replica"
+      - "pipeline.node=2"
+
+  db-replica-2:
+    image: nouchka/sqlite-web:latest
+    container_name: pipeline_db_replica2
+    volumes:
+      - ./data/replica2:/data
+    ports:
+      - "8082:8080"
+    environment:
+      - SQLITE_DATABASE=orders.db
+    labels:
+      - "pipeline.role=replica"
+      - "pipeline.node=3"
