@@ -81,12 +81,15 @@ def route_after_monitor(state: PipelineState) -> str:
     return "end"
 
 
-def build_graph() -> StateGraph:
+def build_graph(checkpointer=None):
     """Build and compile the LangGraph state machine.
 
     Phase 4 graph:
         START → monitor_node → [anomaly?] → diagnose_node → repair_node → slack_node → END
                               → [no anomaly] → END
+
+    Args:
+        checkpointer: Optional LangGraph checkpointer (e.g., SqliteSaver).
 
     Returns:
         Compiled LangGraph graph ready for invocation.
@@ -121,8 +124,4 @@ def build_graph() -> StateGraph:
         "LangGraph built: START → monitor → [anomaly?] → diagnose → repair → slack → END"
     )
 
-    return graph.compile()
-
-
-# Pre-built graph instance for import
-pipeline_graph = build_graph()
+    return graph.compile(checkpointer=checkpointer)

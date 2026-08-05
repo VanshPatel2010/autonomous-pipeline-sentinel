@@ -86,7 +86,7 @@ class TestCreateInitialState:
         expected_keys = {
             "run_id", "timestamp", "anomaly_detected", "anomaly_type",
             "severity", "gap_minutes", "affected_tables", "raw_count",
-            "expected_avg", "null_rate", "diagnoser_output", "repairer_output",
+            "expected_avg", "z_score", "null_rate", "diagnoser_output", "repairer_output",
             "slack_sent",
         }
         assert set(state.keys()) == expected_keys

@@ -1,0 +1,19 @@
+version: 2
+
+sources:
+  - name: public
+    schema: public
+    tables:
+      - name: orders
+        loaded_at_field: created_at
+        freshness:
+          warn_after: {count: 5, period: minute}
+          error_after: {count: 10, period: minute}
+        columns:
+          - name: order_id
+            tests:
+              - unique
+              - not_null
+          - name: order_amount
+            tests:
+              - not_null

@@ -131,7 +131,7 @@ class TestComputeBaseline:
         baseline = agent._compute_baseline(conn, now)
         conn.close()
 
-        assert baseline > 0
+        assert baseline["mean"] > 0
 
     def test_empty_database(self, agent):
         """Should return 0.0 when no historical data exists."""
@@ -139,7 +139,8 @@ class TestComputeBaseline:
         baseline = agent._compute_baseline(conn, _now())
         conn.close()
 
-        assert baseline == 0.0
+        assert baseline["mean"] == 0.0
+        assert baseline["std"] == 0.0
 
 
 # ── Null Rate Tests ───────────────────────────────────────────────────

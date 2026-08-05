@@ -1,0 +1,14 @@
+
+dbt_pipeline:
+  target: dev
+  outputs:
+    dev:
+      type: postgres
+      host: aws-0-ap-northeast-1.pooler.supabase.com
+      user: postgres.qxdwguqpmrkahenbflmw
+      password: z7WBPKzQj3mm6ZU
+      port: 6543
+      dbname: postgres
+      schema: public
+      threads: 1
+      keepalives_idle: 0

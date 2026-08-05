@@ -27,6 +27,7 @@ class PipelineState(TypedDict):
     affected_tables: List[str]
     raw_count: int
     expected_avg: float
+    z_score: float
     null_rate: float
 
     # --- Diagnoser Agent outputs ---
@@ -59,6 +60,7 @@ def create_initial_state(run_id: str, timestamp: str) -> PipelineState:
         affected_tables=[],
         raw_count=0,
         expected_avg=0.0,
+        z_score=0.0,
         null_rate=0.0,
         diagnoser_output={},
         repairer_output={},

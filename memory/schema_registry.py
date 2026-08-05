@@ -6,9 +6,9 @@ schemas/{table}.json. Part of the Phase 5 semantic memory layer.
 
 import json
 import os
-import sqlite3
 from datetime import datetime, timezone
 from typing import Any, Dict, List
+from db.client import DBWrapper
 
 from logging_config import logger
 
@@ -38,31 +38,45 @@ def load_expected_schema(table: str) -> dict:
         return {}
 
 
-def get_actual_schema(conn: sqlite3.Connection, table: str) -> List[dict]:
-    """Retrieve the actual column schema from SQLite via PRAGMA table_info.
+def get_actual_schema(conn: DBWrapper, table: str) -> List[dict]:
+    """Retrieve the actual column schema from the database.
 
     Args:
-        conn: Active SQLite connection.
+        conn: Active DBWrapper connection.
         table: Table name to inspect.
 
     Returns:
         List of dicts with keys: name (str), type (str), notnull (bool).
     """
-    cursor = conn.execute(f'PRAGMA table_info({table})')
-    rows = cursor.fetchall()
-
     columns: List[dict] = []
-    for row in rows:
-        # PRAGMA table_info returns: (cid, name, type, notnull, dflt_value, pk)
-        # Note: SQLite reports notnull=0 for TEXT PRIMARY KEY columns even
-        # though they are effectively NOT NULL. We check the pk flag and
-        # treat any primary key column as notnull=True.
-        is_pk = bool(row[5])
-        columns.append({
-            'name': row[1],
-            'type': row[2],
-            'notnull': bool(row[3]) or is_pk,
-        })
+    
+    if conn.is_postgres:
+        cursor = conn.execute(
+            """
+            SELECT column_name, data_type, is_nullable
+            FROM information_schema.columns
+            WHERE table_name = %s
+            """,
+            (table,)
+        )
+        for row in cursor.fetchall():
+            columns.append({
+                'name': row['column_name'],
+                'type': row['data_type'],
+                'notnull': row['is_nullable'] == 'NO'
+            })
+    else:
+        cursor = conn.execute(f'PRAGMA table_info({table})')
+        rows = cursor.fetchall()
+
+        for row in rows:
+            # PRAGMA table_info returns: (cid, name, type, notnull, dflt_value, pk)
+            is_pk = bool(row[5])
+            columns.append({
+                'name': row[1],
+                'type': row[2],
+                'notnull': bool(row[3]) or is_pk,
+            })
 
     logger.debug(
         f'Actual schema for "{table}": {len(columns)} columns'
@@ -70,11 +84,11 @@ def get_actual_schema(conn: sqlite3.Connection, table: str) -> List[dict]:
     return columns
 
 
-def check_drift(conn: sqlite3.Connection, table: str) -> dict:
+def check_drift(conn: DBWrapper, table: str) -> dict:
     """Compare expected schema (JSON) vs actual schema (DB) and report drift.
 
     Args:
-        conn: Active SQLite connection.
+        conn: Active DBWrapper connection.
         table: Table name to check.
 
     Returns:
@@ -162,12 +176,12 @@ def check_drift(conn: sqlite3.Connection, table: str) -> dict:
 
 
 def save_schema_snapshot(
-    conn: sqlite3.Connection, table: str, schema_dict: dict
+    conn: DBWrapper, table: str, schema_dict: dict
 ) -> None:
     """Persist a schema snapshot to the schema_snapshots table.
 
     Args:
-        conn: Active SQLite connection.
+        conn: Active DBWrapper connection.
         table: Table name being snapshotted.
         schema_dict: Schema dict to serialize as JSON.
     """
@@ -176,7 +190,7 @@ def save_schema_snapshot(
 
     conn.execute(
         'INSERT INTO schema_snapshots (table_name, schema_json, snapshot_at) '
-        'VALUES (?, ?, ?)',
+        'VALUES (%s, %s, %s)',
         (table, schema_json, snapshot_at),
     )
     conn.commit()

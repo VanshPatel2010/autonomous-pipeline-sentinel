@@ -1,0 +1,31 @@
+services:
+  # The API Server (Webhook receiver)
+  - type: web
+    name: pipeline-api
+    env: docker
+    dockerfilePath: Dockerfile
+    autoDeploy: false
+    # Command overrides the default CMD in Dockerfile if specified here, 
+    # but since Dockerfile defaults to this, it's optional.
+    dockerCommand: "uvicorn api.server:app --host 0.0.0.0 --port $PORT"
+    envVars:
+      - key: GROQ_API_KEY
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: SLACK_WEBHOOK_URL
+        sync: false
+    plan: free
+
+  # The Dashboard
+  - type: web
+    name: pipeline-dashboard
+    env: docker
+    dockerfilePath: Dockerfile
+    autoDeploy: false
+    # Override CMD to start Streamlit
+    dockerCommand: "streamlit run dashboard/app.py --server.port $PORT --server.address 0.0.0.0"
+    envVars:
+      - key: DATABASE_URL
+        sync: false
+    plan: free

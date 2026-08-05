@@ -5,7 +5,7 @@ After a failover to a backup source, the gap tracker can mark gaps as
 reconciled once the backfill is complete.
 """
 
-import sqlite3
+from db.client import get_db_connection
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
@@ -33,7 +33,7 @@ def record_gap(
     Returns:
         The generated gap_id for tracking.
     """
-    conn = sqlite3.connect(db_path)
+    conn = get_db_connection()
     gap_id = str(uuid.uuid4())[:8]
     now = datetime.now(timezone.utc)
     start_time = (now - timedelta(minutes=gap_minutes)).isoformat()
@@ -41,6 +41,12 @@ def record_gap(
 
     try:
         conn.execute(
+            """
+            INSERT INTO data_gaps
+                (gap_id, run_id, start_time, end_time, estimated_rows,
+                 source_db, reconciled, created_at)
+            VALUES (%s, %s, %s, %s, %s, %s, 0, %s)
+            """ if conn.is_postgres else
             """
             INSERT INTO data_gaps
                 (gap_id, run_id, start_time, end_time, estimated_rows,
@@ -58,7 +64,7 @@ def record_gap(
         )
         return gap_id
 
-    except sqlite3.Error as e:
+    except Exception as e:
         logger.error(f"Failed to record gap: {e}")
         return ""
     finally:
@@ -75,10 +81,11 @@ def mark_reconciled(gap_id: str, db_path: str = DB_PATH) -> bool:
     Returns:
         True if the gap was found and updated, False otherwise.
     """
-    conn = sqlite3.connect(db_path)
+    conn = get_db_connection()
 
     try:
         cursor = conn.execute(
+            "UPDATE data_gaps SET reconciled = 1 WHERE gap_id = %s" if conn.is_postgres else
             "UPDATE data_gaps SET reconciled = 1 WHERE gap_id = ?",
             (gap_id,),
         )
@@ -91,7 +98,7 @@ def mark_reconciled(gap_id: str, db_path: str = DB_PATH) -> bool:
         logger.warning(f"Gap {gap_id} not found for reconciliation")
         return False
 
-    except sqlite3.Error as e:
+    except Exception as e:
         logger.error(f"Failed to mark gap as reconciled: {e}")
         return False
     finally:
@@ -110,11 +117,18 @@ def get_unreconciled_gaps(
     Returns:
         List of gap dicts, most recent first.
     """
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
+    conn = get_db_connection()
 
     try:
         rows = conn.execute(
+            """
+            SELECT gap_id, run_id, start_time, end_time,
+                   estimated_rows, source_db, reconciled, created_at
+            FROM data_gaps
+            WHERE reconciled = 0
+            ORDER BY created_at DESC
+            LIMIT %s
+            """ if conn.is_postgres else
             """
             SELECT gap_id, run_id, start_time, end_time,
                    estimated_rows, source_db, reconciled, created_at
@@ -128,7 +142,7 @@ def get_unreconciled_gaps(
 
         return [dict(row) for row in rows]
 
-    except sqlite3.Error as e:
+    except Exception as e:
         logger.error(f"Failed to query gaps: {e}")
         return []
     finally:
@@ -147,11 +161,17 @@ def get_all_gaps(
     Returns:
         List of gap dicts, most recent first.
     """
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
+    conn = get_db_connection()
 
     try:
         rows = conn.execute(
+            """
+            SELECT gap_id, run_id, start_time, end_time,
+                   estimated_rows, source_db, reconciled, created_at
+            FROM data_gaps
+            ORDER BY created_at DESC
+            LIMIT %s
+            """ if conn.is_postgres else
             """
             SELECT gap_id, run_id, start_time, end_time,
                    estimated_rows, source_db, reconciled, created_at
@@ -164,7 +184,7 @@ def get_all_gaps(
 
         return [dict(row) for row in rows]
 
-    except sqlite3.Error as e:
+    except Exception as e:
         logger.error(f"Failed to query gaps: {e}")
         return []
     finally:

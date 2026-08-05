@@ -157,6 +157,40 @@ def format_slack_message(state: dict) -> dict:
                 },
             ],
         },
+        {
+            "type": "actions",
+            "elements": [
+                {
+                    "type": "button",
+                    "text": {
+                        "type": "plain_text",
+                        "text": "Approve Repair"
+                    },
+                    "style": "primary",
+                    "value": f"approve_{f['run_id']}",
+                    "action_id": "approve_repair"
+                },
+                {
+                    "type": "button",
+                    "text": {
+                        "type": "plain_text",
+                        "text": "Reject & Escalate"
+                    },
+                    "style": "danger",
+                    "value": f"reject_{f['run_id']}",
+                    "action_id": "reject_repair"
+                },
+                {
+                    "type": "button",
+                    "text": {
+                        "type": "plain_text",
+                        "text": "View Logs"
+                    },
+                    "url": f"http://localhost:8080/logs/{f['run_id']}",
+                    "action_id": "view_logs"
+                }
+            ]
+        },
         {"type": "divider"},
         {
             "type": "context",
@@ -260,6 +294,40 @@ def format_escalation_message(state: dict) -> dict:
                     "text": f"*Confidence:*\n{f['confidence']:.0%}",
                 },
             ],
+        },
+        {
+            "type": "actions",
+            "elements": [
+                {
+                    "type": "button",
+                    "text": {
+                        "type": "plain_text",
+                        "text": "Approve Repair"
+                    },
+                    "style": "primary",
+                    "value": f"approve_{f['run_id']}",
+                    "action_id": "approve_repair"
+                },
+                {
+                    "type": "button",
+                    "text": {
+                        "type": "plain_text",
+                        "text": "Reject & Escalate"
+                    },
+                    "style": "danger",
+                    "value": f"reject_{f['run_id']}",
+                    "action_id": "reject_repair"
+                },
+                {
+                    "type": "button",
+                    "text": {
+                        "type": "plain_text",
+                        "text": "View Logs"
+                    },
+                    "url": f"http://localhost:8080/logs/{f['run_id']}",
+                    "action_id": "view_logs"
+                }
+            ]
         },
         {"type": "divider"},
         {

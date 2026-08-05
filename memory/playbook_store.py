@@ -6,19 +6,11 @@ and updates success/failure counts after each attempt.
 This is how the system learns what fixes work over time.
 """
 
-import sqlite3
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
-
+from db.client import get_db_connection
 from config import DB_PATH
 from logging_config import logger
-
-
-def _get_connection(db_path: str = DB_PATH) -> sqlite3.Connection:
-    """Get a SQLite connection with row factory."""
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
-    return conn
 
 
 def get_best_playbook(
@@ -39,7 +31,7 @@ def get_best_playbook(
     Returns:
         Best matching playbook dict, or None if no playbooks exist.
     """
-    conn = _get_connection(db_path)
+    conn = get_db_connection()
 
     try:
         row = conn.execute(
@@ -47,7 +39,17 @@ def get_best_playbook(
             SELECT id, anomaly_type, severity, action_taken,
                    success_count, failure_count, last_used
             FROM playbooks
-            WHERE anomaly_type = ? AND severity = ?
+            WHERE anomaly_type = %s AND severity = %s
+            ORDER BY
+                CAST(success_count AS REAL) / GREATEST(success_count + failure_count, 1) DESC,
+                last_used DESC
+            LIMIT 1
+            """ if conn.is_postgres else
+            """
+            SELECT id, anomaly_type, severity, action_taken,
+                   success_count, failure_count, last_used
+            FROM playbooks
+            WHERE anomaly_type = %s AND severity = %s
             ORDER BY
                 CAST(success_count AS REAL) / MAX(success_count + failure_count, 1) DESC,
                 last_used DESC
@@ -75,7 +77,7 @@ def get_best_playbook(
         )
         return None
 
-    except sqlite3.Error as e:
+    except Exception as e:
         logger.error(f"Failed to query playbooks: {e}")
         return None
     finally:
@@ -101,16 +103,17 @@ def record_outcome(
         success: Whether the repair was successful.
         db_path: Path to the SQLite database.
     """
-    conn = sqlite3.connect(db_path)
+    conn = get_db_connection()
     now = datetime.now(timezone.utc).isoformat()
 
     try:
         # Ensure the playbook entry exists
         conn.execute(
             """
-            INSERT OR IGNORE INTO playbooks
+            INSERT INTO playbooks
                 (anomaly_type, severity, action_taken, success_count, failure_count, last_used)
-            VALUES (?, ?, ?, 0, 0, ?)
+            VALUES (%s, %s, %s, 0, 0, %s)
+            ON CONFLICT DO NOTHING
             """,
             (anomaly_type, severity, action_taken, now),
         )
@@ -120,8 +123,8 @@ def record_outcome(
             conn.execute(
                 """
                 UPDATE playbooks
-                SET success_count = success_count + 1, last_used = ?
-                WHERE anomaly_type = ? AND severity = ? AND action_taken = ?
+                SET success_count = success_count + 1, last_used = %s
+                WHERE anomaly_type = %s AND severity = %s AND action_taken = %s
                 """,
                 (now, anomaly_type, severity, action_taken),
             )
@@ -129,8 +132,8 @@ def record_outcome(
             conn.execute(
                 """
                 UPDATE playbooks
-                SET failure_count = failure_count + 1, last_used = ?
-                WHERE anomaly_type = ? AND severity = ? AND action_taken = ?
+                SET failure_count = failure_count + 1, last_used = %s
+                WHERE anomaly_type = %s AND severity = %s AND action_taken = %s
                 """,
                 (now, anomaly_type, severity, action_taken),
             )
@@ -142,7 +145,7 @@ def record_outcome(
             f"{anomaly_type}/{severity} → {outcome}"
         )
 
-    except sqlite3.Error as e:
+    except Exception as e:
         logger.error(f"Failed to record playbook outcome: {e}")
     finally:
         conn.close()
@@ -160,7 +163,7 @@ def get_all_playbooks(
     Returns:
         List of playbook dicts.
     """
-    conn = _get_connection(db_path)
+    conn = get_db_connection()
 
     try:
         rows = conn.execute(
@@ -169,15 +172,23 @@ def get_all_playbooks(
                    success_count, failure_count, last_used
             FROM playbooks
             ORDER BY
+                CAST(success_count AS REAL) / GREATEST(success_count + failure_count, 1) DESC
+            LIMIT %s
+            """ if conn.is_postgres else
+            """
+            SELECT id, anomaly_type, severity, action_taken,
+                   success_count, failure_count, last_used
+            FROM playbooks
+            ORDER BY
                 CAST(success_count AS REAL) / MAX(success_count + failure_count, 1) DESC
-            LIMIT ?
+            LIMIT %s
             """,
             (limit,),
         ).fetchall()
 
         return [dict(row) for row in rows]
 
-    except sqlite3.Error as e:
+    except Exception as e:
         logger.error(f"Failed to query playbooks: {e}")
         return []
     finally:

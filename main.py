@@ -8,7 +8,7 @@ Usage:
     python main.py --once       # Run a single check and exit
 """
 
-import sqlite3
+from db.client import get_db_connection
 import sys
 import time
 import uuid
@@ -16,15 +16,40 @@ from datetime import datetime, timezone
 
 import schedule
 
-from config import DB_PATH, MOCK_MODE, POLLING_INTERVAL_MINUTES
-from graph import pipeline_graph
+from config import DB_PATH, MOCK_MODE, POLLING_INTERVAL_MINUTES, DATABASE_URL
+from graph import build_graph
 from logging_config import logger
 from memory.incident_store import init_db as init_incident_db, insert_incident
-from seed_db import create_tables
 from state import create_initial_state
+from opentelemetry import trace
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor, ConsoleSpanExporter
+
+# Setup OpenTelemetry Tracer
+provider = TracerProvider()
+processor = BatchSpanProcessor(ConsoleSpanExporter())
+provider.add_span_processor(processor)
+trace.set_tracer_provider(provider)
+tracer = trace.get_tracer(__name__)
+
+from contextlib import contextmanager
+
+@contextmanager
+def get_checkpointer():
+    if DATABASE_URL:
+        from psycopg_pool import ConnectionPool
+        from langgraph.checkpoint.postgres import PostgresSaver
+        with ConnectionPool(conninfo=DATABASE_URL, kwargs={"autocommit": True, "prepare_threshold": None}) as pool:
+            checkpointer = PostgresSaver(pool)
+            checkpointer.setup()
+            yield checkpointer
+    else:
+        from langgraph.checkpoint.sqlite import SqliteSaver
+        with SqliteSaver.from_conn_string("pipeline_checkpoints.db") as checkpointer:
+            yield checkpointer
 
 
-def run_pipeline() -> None:
+def run_pipeline(state_overrides: dict = None) -> None:
     """Execute a single pipeline monitoring run.
 
     Generates a unique run_id, creates initial state,
@@ -39,10 +64,18 @@ def run_pipeline() -> None:
 
     # Create fresh state for this run
     initial_state = create_initial_state(run_id=run_id, timestamp=timestamp)
+    if state_overrides:
+        initial_state.update(state_overrides)
 
     try:
-        # Invoke the LangGraph pipeline
-        final_state = pipeline_graph.invoke(initial_state)
+        with tracer.start_as_current_span("run_pipeline"):
+            with get_checkpointer() as checkpointer:
+                # Build graph with durable checkpointing
+                pipeline_graph = build_graph(checkpointer=checkpointer)
+                
+                # Invoke the LangGraph pipeline
+                config = {"configurable": {"thread_id": run_id}}
+                final_state = pipeline_graph.invoke(initial_state, config=config)
 
         # Log results
         diagnoser = final_state.get("diagnoser_output", {})
@@ -68,7 +101,7 @@ def run_pipeline() -> None:
             logger.info(f"[{run_id}] ✅ Pipeline healthy. No issues detected.")
 
         # Persist incident to episodic LTM
-        insert_incident({
+        incident_data = {
             "run_id": run_id,
             "timestamp": timestamp,
             "anomaly_type": final_state.get("anomaly_type", ""),
@@ -79,7 +112,9 @@ def run_pipeline() -> None:
             "fix_taken": final_state.get("repairer_output", {}).get("action_taken", ""),
             "resolved": int(final_state.get("repairer_output", {}).get("success", False)),
             "confidence": diagnoser.get("confidence", 0.0),
-        })
+        }
+        logger.info(f"[{run_id}] Saving incident with fix_taken='{incident_data['fix_taken']}'")
+        insert_incident(incident_data)
 
         # Fallback: force-send Slack for HIGH/CRITICAL if it wasn't sent
         from config import SLACK_WEBHOOK_URL
@@ -100,11 +135,13 @@ def run_pipeline() -> None:
 
 def init() -> None:
     """Initialize database tables on startup."""
-    conn = sqlite3.connect(DB_PATH)
-    create_tables(conn)
-    conn.close()
-    init_incident_db(DB_PATH)
-    logger.info(f"Database initialized at {DB_PATH}")
+    from db.setup_postgres import setup_postgres_schemas
+    setup_postgres_schemas()
+    
+    from simulator import setup_tables
+    setup_tables()
+    
+    logger.info(f"Databases initialized (PostgreSQL primary).")
 
 
 def main() -> None:

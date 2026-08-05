@@ -10,9 +10,10 @@ Writes findings into the LangGraph state dict (STM).
 No LLM calls — purely statistical anomaly detection.
 """
 
-import sqlite3
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict
+
+from db.client import get_db_connection, DBWrapper
 
 import pandas as pd
 
@@ -24,6 +25,7 @@ from config import (
     NULL_PCT_THRESHOLD,
     ORDERS_TABLE,
     POLLING_INTERVAL_MINUTES,
+    Z_SCORE_THRESHOLD,
 )
 from logging_config import logger
 from state import PipelineState
@@ -50,13 +52,11 @@ class MonitorAgent:
             db_path = _cfg.DB_PATH
         self.db_path = db_path
 
-    def _get_connection(self) -> sqlite3.Connection:
-        """Get a SQLite connection."""
-        conn = sqlite3.connect(self.db_path)
-        conn.row_factory = sqlite3.Row
-        return conn
+    def _get_connection(self) -> DBWrapper:
+        """Get an abstracted database connection."""
+        return get_db_connection(self.db_path)
 
-    def _get_current_count(self, conn: sqlite3.Connection, now: datetime) -> int:
+    def _get_current_count(self, conn: DBWrapper, now: datetime) -> int:
         """Get row count for the most recent 5-minute window.
 
         Args:
@@ -73,18 +73,18 @@ class MonitorAgent:
         ).fetchone()
         return result[0] if result else 0
 
-    def _compute_baseline(self, conn: sqlite3.Connection, now: datetime) -> float:
-        """Compute 7-day rolling average of rows per 5-min window using pandas.
+    def _compute_baseline(self, conn: DBWrapper, now: datetime) -> Dict[str, float]:
+        """Compute 7-day rolling average and stddev of rows per 5-min window using pandas.
 
         Queries the last 7 days of data, groups into 5-min windows,
-        and returns the average row count per window.
+        and returns the mean and standard deviation of row counts per window.
 
         Args:
             conn: SQLite connection.
             now: Current UTC timestamp.
 
         Returns:
-            Average row count per 5-min window over the last 7 days.
+            Dict containing 'mean' and 'std' for row counts.
         """
         baseline_start = now - timedelta(days=7)
 
@@ -92,16 +92,18 @@ class MonitorAgent:
             SELECT created_at FROM {ORDERS_TABLE}
             WHERE created_at > ? AND created_at <= ?
         """
+        
+        converted_query = conn._convert_sql(query)
 
         df = pd.read_sql_query(
-            query,
-            conn,
+            converted_query,
+            conn.conn,
             params=(baseline_start.isoformat(), now.isoformat()),
         )
 
         if df.empty:
             logger.warning("No baseline data found for the last 7 days")
-            return 0.0
+            return {"mean": 0.0, "std": 0.0}
 
         df["created_at"] = pd.to_datetime(df["created_at"], format="ISO8601")
 
@@ -109,15 +111,17 @@ class MonitorAgent:
         df["window"] = df["created_at"].dt.floor("5min")
         window_counts = df.groupby("window").size()
 
-        baseline_avg = float(window_counts.mean())
+        mean_val = float(window_counts.mean())
+        std_val = float(window_counts.std()) if len(window_counts) > 1 else 0.0
+        
         logger.info(
-            f"Baseline: {baseline_avg:.1f} rows/window "
+            f"Baseline: {mean_val:.1f} rows/window, std: {std_val:.1f} "
             f"(from {len(window_counts)} windows)"
         )
 
-        return baseline_avg
+        return {"mean": mean_val, "std": std_val}
 
-    def _check_null_rate(self, conn: sqlite3.Connection, now: datetime) -> float:
+    def _check_null_rate(self, conn: DBWrapper, now: datetime) -> float:
         """Calculate null rate on order_amount for the recent window.
 
         Args:
@@ -148,7 +152,7 @@ class MonitorAgent:
 
         return nulls / total
 
-    def _estimate_gap_minutes(self, conn: sqlite3.Connection, now: datetime) -> float:
+    def _estimate_gap_minutes(self, conn: DBWrapper, now: datetime) -> float:
         """Estimate how long data has been missing.
 
         Finds the timestamp of the most recent order and calculates
@@ -207,120 +211,88 @@ class MonitorAgent:
             return "HIGH"
 
     def run(self, state: PipelineState) -> PipelineState:
-        """Execute the monitoring check and update state.
-
-        Steps:
-        1. Query current 5-min window row count
-        2. Compute 7-day rolling average baseline
-        3. Check null rate on order_amount
-        4. Estimate gap duration if anomaly found
-        5. Assign severity and update state
-
-        Args:
-            state: Current pipeline state dict.
-
-        Returns:
-            Updated state dict with monitor findings.
+        """Execute the monitoring check and update state using dbt.
+        
+        If the state already has an anomaly (e.g. from the webhook Dead Man's Switch),
+        we skip the dbt checks and pass it along.
         """
         run_id = state["run_id"]
-        logger.info(f"[{run_id}] Monitor Agent starting check...")
+        logger.info(f"[{run_id}] Monitor Agent starting dbt check...")
 
-        conn = self._get_connection()
-        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        if state.get("anomaly_detected"):
+            logger.info(f"[{run_id}] Anomaly already detected by Webhook: {state['anomaly_type']}. Skipping dbt.")
+            return state
 
+        # Run dbt test
+        import subprocess
+        import json
+        import os
+        
+        project_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "dbt_pipeline")
+        logger.info(f"[{run_id}] Running dbt test in {project_dir}...")
+        
         try:
-            # Step 0: Check for schema drift (Phase 5)
-            try:
-                from memory.schema_registry import check_drift
-                drift_result = check_drift(conn, 'orders')
-                if drift_result['drift_detected']:
-                    logger.warning(
-                        f'[{run_id}] SCHEMA DRIFT DETECTED: '
-                        f'new={drift_result["new_columns"]}, '
-                        f'deleted={drift_result["deleted_columns"]}, '
-                        f'type_changes={drift_result["type_changes"]}'
-                    )
-                    state['anomaly_detected'] = True
-                    state['anomaly_type'] = 'schema_drift'
-                    state['severity'] = 'MEDIUM'
-                    state['gap_minutes'] = 0.0
-                    state['affected_tables'] = ['orders']
-                    state['raw_count'] = 0
-                    state['expected_avg'] = 0.0
-                    state['null_rate'] = 0.0
-                    # Pre-fill diagnoser output (schema drift is deterministic)
-                    state['diagnoser_output'] = {
-                        'root_cause': f'Schema drift detected: {drift_result}',
-                        'confidence': 1.0,
-                        'estimated_missing_rows': 0,
-                        'severity_override': 'MEDIUM',
-                    }
-                    conn.close()
-                    return state
-            except Exception as e:
-                logger.debug(f'[{run_id}] Schema drift check skipped: {e}')
-
-            # Step 1: Get current window count
-            raw_count = self._get_current_count(conn, now)
-            state["raw_count"] = raw_count
-            logger.info(f"[{run_id}] Current window count: {raw_count}")
-
-            # Step 2: Compute baseline
-            baseline_avg = self._compute_baseline(conn, now)
-            state["expected_avg"] = baseline_avg
-
-            # Step 3: Check null rate
-            null_rate = self._check_null_rate(conn, now)
-            state["null_rate"] = null_rate
-            logger.info(f"[{run_id}] Null rate: {null_rate:.2%}")
-
-            # Step 4: Detect anomalies
+            result = subprocess.run(
+                ["dbt", "test", "--profiles-dir", "."], 
+                cwd=project_dir, 
+                capture_output=True, 
+                text=True
+            )
+            
+            run_results_path = os.path.join(project_dir, "target", "run_results.json")
+            if not os.path.exists(run_results_path):
+                logger.error(f"[{run_id}] dbt run_results.json not found!")
+                return state
+                
+            with open(run_results_path, "r") as f:
+                data = json.load(f)
+                
+            failures = [r for r in data.get("results", []) if r.get("status") == "fail"]
+            
             anomaly_detected = False
             anomaly_type = ""
-            gap_minutes = 0.0
-
-            # Check row count anomaly
-            if baseline_avg > 0 and raw_count < (baseline_avg * ANOMALY_THRESHOLD):
+            severity = "NONE"
+            affected_tables = []
+            
+            if failures:
                 anomaly_detected = True
-                anomaly_type = "missing_data"
-                gap_minutes = self._estimate_gap_minutes(conn, now)
-                logger.warning(
-                    f"[{run_id}] ANOMALY: Row count {raw_count} < "
-                    f"{ANOMALY_THRESHOLD:.0%} of baseline {baseline_avg:.0f}"
-                )
-
-            # Check null rate anomaly (overrides if worse)
-            if null_rate > NULL_PCT_THRESHOLD:
-                anomaly_detected = True
-                anomaly_type = "data_quality"
-                logger.warning(
-                    f"[{run_id}] ANOMALY: Null rate {null_rate:.2%} > "
-                    f"threshold {NULL_PCT_THRESHOLD:.2%}"
-                )
-
-            # Step 5: Assign severity
-            severity = (
-                self._assign_severity(gap_minutes, null_rate)
-                if anomaly_detected
-                else "NONE"
-            )
-
-            # Update state
+                affected_tables = ["orders"]
+                
+                # Check what kind of test failed
+                failure_names = [f.get("unique_id", "") for f in failures]
+                if any("unique" in name for name in failure_names):
+                    anomaly_type = "data_duplication"
+                    severity = "MEDIUM"
+                elif any("not_null" in name for name in failure_names):
+                    anomaly_type = "data_quality"
+                    severity = "HIGH"
+                elif any("relationships" in name for name in failure_names):
+                    anomaly_type = "referential_integrity"
+                    severity = "MEDIUM"
+                else:
+                    anomaly_type = "data_quality"
+                    severity = "LOW"
+                    
+                logger.warning(f"[{run_id}] dbt test failures detected: {failure_names}")
+                
             state["anomaly_detected"] = anomaly_detected
             state["anomaly_type"] = anomaly_type
             state["severity"] = severity
-            state["gap_minutes"] = gap_minutes
-            state["affected_tables"] = [ORDERS_TABLE] if anomaly_detected else []
-
+            state["affected_tables"] = affected_tables
+            state["raw_count"] = 0
+            state["expected_avg"] = 0.0
+            state["z_score"] = 0.0
+            state["null_rate"] = 0.0
+            
             if anomaly_detected:
                 logger.warning(
-                    f"[{run_id}] Anomaly detected: type={anomaly_type}, "
-                    f"severity={severity}, gap={gap_minutes:.0f}min"
+                    f"[{run_id}] dbt Anomaly detected: type={anomaly_type}, "
+                    f"severity={severity}"
                 )
             else:
-                logger.info(f"[{run_id}] No anomaly detected. Pipeline healthy.")
-
-        finally:
-            conn.close()
-
+                logger.info(f"[{run_id}] ✅ dbt tests passed. Pipeline healthy.")
+                
+        except Exception as e:
+            logger.error(f"[{run_id}] dbt execution failed: {e}")
+            
         return state

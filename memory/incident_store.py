@@ -13,31 +13,18 @@ from typing import Any, Dict, List, Optional
 
 from config import DB_PATH
 from logging_config import logger
-
-
-def _get_connection(db_path: str = DB_PATH) -> sqlite3.Connection:
-    """Get a SQLite connection with row factory."""
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
-    return conn
-
+from db.client import get_db_connection
 
 def init_db(db_path: str = DB_PATH) -> None:
-    """Initialize the incidents table from schema.sql.
+    """Initialize the incidents table from setup_postgres.py.
 
     Safe to call multiple times — uses CREATE TABLE IF NOT EXISTS.
 
     Args:
-        db_path: Path to the SQLite database.
+        db_path: Ignored, retained for backward compatibility.
     """
-    conn = sqlite3.connect(db_path)
-    schema_path = os.path.join(os.path.dirname(__file__), "schema.sql")
-
-    with open(schema_path, "r") as f:
-        conn.executescript(f.read())
-
-    conn.commit()
-    conn.close()
+    from db.setup_postgres import setup_postgres_schemas
+    setup_postgres_schemas()
     logger.info("Incident store initialized (episodic LTM)")
 
 
@@ -47,9 +34,9 @@ def insert_incident(incident: Dict[str, Any], db_path: str = DB_PATH) -> None:
     Args:
         incident: Dict with keys matching the incidents table columns.
                   'affected_tables' can be a list (will be JSON-encoded).
-        db_path: Path to the SQLite database.
+        db_path: Ignored.
     """
-    conn = sqlite3.connect(db_path)
+    conn = get_db_connection()
 
     # Serialize list fields to JSON
     affected_tables = incident.get("affected_tables", [])
@@ -59,10 +46,20 @@ def insert_incident(incident: Dict[str, Any], db_path: str = DB_PATH) -> None:
     try:
         conn.execute(
             """
-            INSERT OR REPLACE INTO incidents 
+            INSERT INTO incidents 
             (run_id, timestamp, anomaly_type, severity, gap_minutes,
              root_cause, affected_tables, fix_taken, resolved, resolved_at, confidence)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(run_id) DO UPDATE SET
+                timestamp=excluded.timestamp,
+                anomaly_type=excluded.anomaly_type,
+                severity=excluded.severity,
+                gap_minutes=excluded.gap_minutes,
+                root_cause=excluded.root_cause,
+                affected_tables=excluded.affected_tables,
+                fix_taken=excluded.fix_taken,
+                resolved=excluded.resolved,
+                confidence=excluded.confidence
             """,
             (
                 incident.get("run_id", ""),
@@ -80,10 +77,10 @@ def insert_incident(incident: Dict[str, Any], db_path: str = DB_PATH) -> None:
         )
         conn.commit()
         logger.info(
-            f"[{incident.get('run_id', '?')}] Incident saved to episodic LTM: "
+            f"[{incident.get('run_id', '?')}] Incident saved/updated to episodic LTM: "
             f"{incident.get('anomaly_type', 'unknown')} ({incident.get('severity', '?')})"
         )
-    except sqlite3.Error as e:
+    except Exception as e:
         logger.error(f"Failed to insert incident: {e}")
     finally:
         conn.close()
@@ -104,7 +101,7 @@ def get_similar_incidents(
     Returns:
         List of incident dicts, most recent first.
     """
-    conn = _get_connection(db_path)
+    conn = get_db_connection()
 
     try:
         rows = conn.execute(
@@ -112,9 +109,9 @@ def get_similar_incidents(
             SELECT run_id, timestamp, anomaly_type, severity, gap_minutes,
                    root_cause, affected_tables, fix_taken, resolved, confidence
             FROM incidents
-            WHERE anomaly_type = ?
+            WHERE anomaly_type = %s
             ORDER BY timestamp DESC
-            LIMIT ?
+            LIMIT %s
             """,
             (anomaly_type, limit),
         ).fetchall()
@@ -133,7 +130,7 @@ def get_similar_incidents(
 
         return incidents
 
-    except sqlite3.Error as e:
+    except Exception as e:
         logger.error(f"Failed to query similar incidents: {e}")
         return []
     finally:
@@ -152,7 +149,7 @@ def get_all_incidents(
     Returns:
         List of incident dicts, most recent first.
     """
-    conn = _get_connection(db_path)
+    conn = get_db_connection()
 
     try:
         rows = conn.execute(
@@ -161,14 +158,14 @@ def get_all_incidents(
                    root_cause, affected_tables, fix_taken, resolved, confidence
             FROM incidents
             ORDER BY timestamp DESC
-            LIMIT ?
+            LIMIT %s
             """,
             (limit,),
         ).fetchall()
 
         return [dict(row) for row in rows]
 
-    except sqlite3.Error as e:
+    except Exception as e:
         logger.error(f"Failed to query incidents: {e}")
         return []
     finally:
@@ -191,15 +188,15 @@ def auto_resolve_incident(
     Returns:
         True if the incident was found and updated, False otherwise.
     """
-    conn = sqlite3.connect(db_path)
+    conn = get_db_connection()
     now = datetime.now(timezone.utc).isoformat()
 
     try:
         cursor = conn.execute(
             """
             UPDATE incidents
-            SET resolved = 1, resolved_at = ?
-            WHERE run_id = ? AND resolved = 0
+            SET resolved = 1, resolved_at = %s
+            WHERE run_id = %s AND resolved = 0
             """,
             (now, run_id),
         )
@@ -217,7 +214,7 @@ def auto_resolve_incident(
             )
             return False
 
-    except sqlite3.Error as e:
+    except Exception as e:
         logger.error(f"[{run_id}] Failed to auto-resolve incident: {e}")
         return False
     finally:

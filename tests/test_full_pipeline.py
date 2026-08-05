@@ -12,7 +12,7 @@ import uuid
 import random
 import pytest
 from datetime import datetime, timedelta, timezone
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 
 
 # ---------------------------------------------------------------------------
@@ -285,10 +285,15 @@ def test_run_pipeline_function(pipeline_db):
         'slack_sent': False,
     }
 
-    with patch('graph.pipeline_graph.invoke', return_value=fake_result) as mock_invoke, \
-         patch('memory.incident_store.insert_incident') as mock_insert:
+    with patch('main.build_graph') as mock_build_graph, \
+         patch('main.insert_incident') as mock_insert, \
+         patch('main.get_checkpointer'):
+        mock_graph = MagicMock()
+        mock_graph.invoke.return_value = fake_result
+        mock_build_graph.return_value = mock_graph
+        
         from main import run_pipeline
         run_pipeline()
 
-        mock_invoke.assert_called()
+        mock_graph.invoke.assert_called()
         mock_insert.assert_called()

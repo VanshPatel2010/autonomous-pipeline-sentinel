@@ -58,88 +58,7 @@ def db_path(tmp_path):
     return path
 
 
-# ── Parse LLM Response Tests ─────────────────────────────────────────
-
-
-class TestParseLlmResponse:
-    """Tests for DiagnoserAgent._parse_llm_response."""
-
-    def test_valid_json(self, agent, anomaly_state):
-        """Should correctly parse a valid JSON response."""
-        response = json.dumps({
-            "root_cause": "Mumbai source DB outage",
-            "confidence": 0.85,
-            "estimated_missing_rows": 12000,
-            "affected_tables": ["orders"],
-            "maintenance_window_likely": False,
-        })
-
-        result = agent._parse_llm_response(response, anomaly_state)
-
-        assert result["root_cause"] == "Mumbai source DB outage"
-        assert result["confidence"] == 0.85
-        assert result["estimated_missing_rows"] == 12000
-        assert result["affected_tables"] == ["orders"]
-        assert result["maintenance_window_likely"] is False
-
-    def test_markdown_json(self, agent, anomaly_state):
-        """Should extract JSON from markdown code blocks."""
-        response = """Here is my analysis:
-
-```json
-{
-    "root_cause": "Network partition between services",
-    "confidence": 0.72,
-    "estimated_missing_rows": 5000,
-    "affected_tables": ["orders"],
-    "maintenance_window_likely": true
-}
-```
-
-Based on the analysis above..."""
-
-        result = agent._parse_llm_response(response, anomaly_state)
-
-        assert result["root_cause"] == "Network partition between services"
-        assert result["confidence"] == 0.72
-        assert result["maintenance_window_likely"] is True
-
-    def test_invalid_json(self, agent, anomaly_state):
-        """Should fall back to default when JSON parsing fails."""
-        response = "This is not valid JSON at all. Let me explain..."
-
-        result = agent._parse_llm_response(response, anomaly_state)
-
-        # Should return fallback output
-        assert "root_cause" in result
-        assert result["confidence"] == 0.5  # fallback confidence
-        assert isinstance(result["estimated_missing_rows"], int)
-
-    def test_confidence_clamping(self, agent, anomaly_state):
-        """Should clamp confidence between 0.0 and 1.0."""
-        response = json.dumps({
-            "root_cause": "Test",
-            "confidence": 1.5,
-            "estimated_missing_rows": 0,
-            "affected_tables": [],
-            "maintenance_window_likely": False,
-        })
-
-        result = agent._parse_llm_response(response, anomaly_state)
-        assert result["confidence"] == 1.0
-
-    def test_negative_confidence_clamping(self, agent, anomaly_state):
-        """Should clamp negative confidence to 0.0."""
-        response = json.dumps({
-            "root_cause": "Test",
-            "confidence": -0.5,
-            "estimated_missing_rows": 0,
-            "affected_tables": [],
-            "maintenance_window_likely": False,
-        })
-
-        result = agent._parse_llm_response(response, anomaly_state)
-        assert result["confidence"] == 0.0
+# (TestParseLlmResponse removed as _parse_llm_response is obsolete)
 
 
 # ── Fallback Output Tests ────────────────────────────────────────────
@@ -233,14 +152,14 @@ class TestDiagnoserRun:
         # Mock the LLM to return high confidence
         mock_llm = MagicMock()
         mock_response = MagicMock()
-        mock_response.content = json.dumps({
+        mock_response.model_dump.return_value = {
             "root_cause": "Source DB outage",
             "confidence": 0.9,
             "estimated_missing_rows": 5000,
             "affected_tables": ["orders"],
             "maintenance_window_likely": False,
-        })
-        mock_llm.invoke.return_value = mock_response
+        }
+        mock_llm.chat.completions.create.return_value = mock_response
         agent._llm = mock_llm
 
         # State with MEDIUM severity and gap > 30 min
@@ -261,7 +180,7 @@ class TestDiagnoserRun:
 
         # Mock the LLM to raise an error
         mock_llm = MagicMock()
-        mock_llm.invoke.side_effect = Exception("API rate limit exceeded")
+        mock_llm.chat.completions.create.side_effect = Exception("API rate limit exceeded")
         agent._llm = mock_llm
 
         result = agent.run(anomaly_state)

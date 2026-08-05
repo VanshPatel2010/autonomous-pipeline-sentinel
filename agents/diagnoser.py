@@ -6,7 +6,10 @@ Falls back to mock output if the LLM call fails or MOCK_MODE is enabled.
 """
 
 import json
-from typing import Any, Dict
+from typing import Any, Dict, List
+
+from pydantic import BaseModel, Field
+import instructor
 
 from config import CONFIDENCE_MIN, GROQ_API_KEY, GROQ_MODEL, MOCK_MODE
 from logging_config import logger
@@ -17,6 +20,25 @@ from prompts.diagnoser_prompt import (
     build_user_prompt,
 )
 from state import PipelineState
+
+
+LLM_LOG_MAX_CHARS = 4000
+
+
+class DiagnosisOutput(BaseModel):
+    """Structured LLM output for diagnosis."""
+    root_cause: str = Field(..., description="The likely root cause of the anomaly")
+    confidence: float = Field(..., ge=0.0, le=1.0, description="Confidence score between 0.0 and 1.0")
+    estimated_missing_rows: int = Field(..., description="Estimated number of missing rows")
+    affected_tables: List[str] = Field(..., description="List of affected tables")
+    maintenance_window_likely: bool = Field(..., description="Is this likely a planned maintenance window?")
+
+
+def _format_llm_log_text(text: str) -> str:
+    """Keep LLM request/response logs readable while preserving useful context."""
+    if len(text) <= LLM_LOG_MAX_CHARS:
+        return text
+    return f"{text[:LLM_LOG_MAX_CHARS]}... [truncated {len(text) - LLM_LOG_MAX_CHARS} chars]"
 
 
 class DiagnoserAgent:
@@ -37,55 +59,17 @@ class DiagnoserAgent:
         self._llm = None
 
     def _get_llm(self) -> Any:
-        """Lazily initialize the Groq LLM client.
+        """Lazily initialize the Groq client patched with instructor.
 
         Returns:
-            ChatGroq instance configured with the model from config.
+            Instructor-patched Groq client.
         """
         if self._llm is None:
-            from langchain_groq import ChatGroq
+            from groq import Groq
 
-            self._llm = ChatGroq(
-                model=GROQ_MODEL,
-                temperature=0,
-                api_key=GROQ_API_KEY,
-            )
+            client = Groq(api_key=GROQ_API_KEY)
+            self._llm = instructor.from_groq(client, mode=instructor.Mode.TOOLS)
         return self._llm
-
-    def _parse_llm_response(self, response_text: str, state: PipelineState) -> Dict[str, Any]:
-        """Parse and validate the LLM's JSON response.
-
-        Args:
-            response_text: Raw text response from the LLM.
-            state: Current pipeline state for fallback values.
-
-        Returns:
-            Parsed diagnosis dict with validated fields.
-        """
-        # Try to extract JSON from the response
-        text = response_text.strip()
-
-        # Handle markdown code blocks
-        if "```json" in text:
-            text = text.split("```json")[1].split("```")[0].strip()
-        elif "```" in text:
-            text = text.split("```")[1].split("```")[0].strip()
-
-        try:
-            result = json.loads(text)
-        except json.JSONDecodeError as e:
-            logger.warning(f"Failed to parse LLM JSON response: {e}")
-            logger.debug(f"Raw response: {response_text[:500]}")
-            return self._build_fallback_output(state)
-
-        # Validate and normalize fields
-        return {
-            "root_cause": str(result.get("root_cause", "Unknown")),
-            "confidence": float(min(max(result.get("confidence", 0.5), 0.0), 1.0)),
-            "estimated_missing_rows": int(result.get("estimated_missing_rows", 0)),
-            "affected_tables": list(result.get("affected_tables", state.get("affected_tables", []))),
-            "maintenance_window_likely": bool(result.get("maintenance_window_likely", False)),
-        }
 
     def _build_fallback_output(self, state: PipelineState) -> Dict[str, Any]:
         """Build a fallback diagnosis when LLM is unavailable.
@@ -159,20 +143,20 @@ class DiagnoserAgent:
         else:
             try:
                 llm = self._get_llm()
-                logger.info(f"[{run_id}] Calling Groq LLM ({GROQ_MODEL})...")
+                logger.info(f"[{run_id}] Calling Groq LLM ({GROQ_MODEL}) with Instructor...")
 
-                from langchain_core.messages import HumanMessage, SystemMessage
+                response = llm.chat.completions.create(
+                    model=GROQ_MODEL,
+                    response_model=DiagnosisOutput,
+                    messages=[
+                        {"role": "system", "content": SYSTEM_PROMPT},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    max_retries=3,
+                )
 
-                messages = [
-                    SystemMessage(content=SYSTEM_PROMPT),
-                    HumanMessage(content=user_prompt),
-                ]
-
-                response = llm.invoke(messages)
-                response_text = response.content
-
-                logger.info(f"[{run_id}] LLM response received ({len(response_text)} chars)")
-                diagnoser_output = self._parse_llm_response(response_text, state)
+                logger.info(f"[{run_id}] LLM structured response received successfully.")
+                diagnoser_output = response.model_dump()
 
             except Exception as e:
                 logger.error(
